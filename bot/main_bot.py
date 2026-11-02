@@ -6,9 +6,12 @@ from aiogram.filters import Command
 # Импортируем наши модули
 from mock_model import MockModel
 from knowledge_base import KnowledgeBase
+import os
+from dotenv import load_dotenv
 
-# ВСТАВЬ СЮДА СВОЙ ТОКЕН ОТ BOTFATHER
-TOKEN = "9228882343:AAGhb71xo7bdrIFHzUPrM_oDKCoR_-_ZnQE"
+load_dotenv() 
+
+TOKEN = os.getenv("BOT_TOKEN")
 
 # Инициализация бота и диспетчера
 bot = Bot(token=TOKEN)
