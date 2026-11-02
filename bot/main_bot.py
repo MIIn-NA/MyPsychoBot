@@ -3,8 +3,7 @@ import logging
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
-# Импортируем наши модули
-from mock_model import MockModel
+from real_model import RealModel
 from knowledge_base import KnowledgeBase
 import os
 from dotenv import load_dotenv
@@ -17,8 +16,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Инициализация нашей модели и базы знаний
-model = MockModel()
+model = RealModel()
 kb = KnowledgeBase()
 
 # Обработчик команды /start
