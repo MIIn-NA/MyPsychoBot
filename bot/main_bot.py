@@ -1,3 +1,5 @@
+"""НАСТЯ Telegram-бот: команды, кнопки, получение сообщений и отправка ответов"""
+
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, types
@@ -6,6 +8,7 @@ from aiogram.filters import Command
 # Импортируем наши модули
 from mock_model import MockModel
 from knowledge_base import KnowledgeBase
+from solver import Solver
 import os
 from dotenv import load_dotenv
 
@@ -17,9 +20,8 @@ TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Инициализация нашей модели и базы знаний
-model = MockModel()
-kb = KnowledgeBase()
+# Инициализация решателя с моделью-заглушкой и базой знаний
+solver = Solver(model=MockModel(), knowledge_base=KnowledgeBase())
 
 # Обработчик команды /start
 @dp.message(Command("start"))
@@ -29,23 +31,8 @@ async def cmd_start(message: types.Message):
 # Обработчик всех текстовых сообщений
 @dp.message()
 async def handle_message(message: types.Message):
-    text = message.text
-    
-    # 1. Получаем предсказание от модели
-    predicted_class, confidence = model.predict(text)
-    
-    # 2. Получаем рекомендацию из базы знаний
-    advice = kb.get_recommendation(text, predicted_class)
-    
-    # 3. Формируем ответ
-    class_names = {0: "Норма", 1: "Стресс", 2: "Тревога"}
-    state_name = class_names[predicted_class]
-    
-    response = f"Я определил твое состояние как: **{state_name}** (уверенность: {int(confidence*100)}%)\n\n"
-    response += f"💡 Совет: {advice}"
-    
-    # Отправляем ответ студенту
-    await message.answer(response, parse_mode="Markdown")
+    result = solver.solve(message.text)
+    await message.answer(result.to_message(), parse_mode="Markdown")
 
 # Запуск бота
 async def main():
