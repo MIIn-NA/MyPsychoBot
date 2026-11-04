@@ -1,3 +1,5 @@
+"""НАСТЯ Рекомендации и правила их выбора"""
+
 import re
 
 class KnowledgeBase:
