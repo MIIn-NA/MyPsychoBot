@@ -14,6 +14,38 @@
 - Сохранение результатов.
 - Статистика и графики в Telegram.
 
+## Запуск
+
+Выполняйте команды из папки `MyPsychoBot`:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
+```
+
+Укажите токен Telegram-бота в `BOT_TOKEN` в файле `.env`, затем запустите:
+
+```bash
+python bot/main_bot.py
+```
+
+Файл `.env` и локальная база `db/results.db` исключены из Git.
+
+## Отправка изменений на GitHub
+
+Git-репозиторий бота находится в папке `MyPsychoBot`. Все команды Git
+для бота выполняйте из этой папки:
+
+```bash
+git status
+git add .
+git diff --cached
+git commit -m "Описание изменений"
+git push origin main
+```
+
 ## Команда
 - Настя — Telegram-бот и база знаний.
 - Даша — модель классификации.
