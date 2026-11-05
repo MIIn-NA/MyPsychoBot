@@ -1,3 +1,19 @@
 venv/
+.venv/
 __pycache__/
+*.py[cod]
+
+# Локальные настройки и секреты
 .env
+.env.*
+!.env.example
+
+# Локальные данные бота
+db/*
+!db/.gitkeep
+*.db-wal
+*.db-shm
+
+# Служебные файлы ОС
+.DS_Store
+Thumbs.db
