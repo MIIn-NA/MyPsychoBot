@@ -16,7 +16,7 @@ db/*
 
 # Обученная модель RuBERT
 models/
-results/
+
 
 # Служебные файлы ОС
 .DS_Store
