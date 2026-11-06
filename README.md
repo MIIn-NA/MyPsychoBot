@@ -33,19 +33,6 @@ python bot/main_bot.py
 
 Файл `.env` и локальная база `db/results.db` исключены из Git.
 
-## Отправка изменений на GitHub
-
-Git-репозиторий бота находится в папке `MyPsychoBot`. Все команды Git
-для бота выполняйте из этой папки:
-
-```bash
-git status
-git add .
-git diff --cached
-git commit -m "Описание изменений"
-git push origin main
-```
-
 ## Команда
 - Настя — Telegram-бот и база знаний.
 - Даша — модель классификации.
