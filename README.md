@@ -6,11 +6,11 @@
 
 ## Сейчас реализовано
 - Приём сообщений через Telegram.
-- Определение состояния по ключевым словам.
+- Классификация состояния моделью RuBERT (дообучена на трёх классах).
+- Запасной вариант: если модель не найдена, бот работает на `MockModel` (ключевые слова).
 - Базовые и контекстные рекомендации.
 
 ## Планируется
-- Классификация на основе RuBERT.
 - Сохранение результатов.
 - Статистика и графики в Telegram.
 
@@ -20,9 +20,9 @@
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 python -m pip install -r requirements.txt
-cp .env.example .env
+cp .env.example .env             # Windows: copy .env.example .env
 ```
 
 Укажите токен Telegram-бота в `BOT_TOKEN` в файле `.env`, затем запустите:
@@ -33,6 +33,31 @@ python bot/main_bot.py
 
 Файл `.env` и локальная база `db/results.db` исключены из Git.
 
+## Модель RuBERT
+
+Обученная модель весит около 700 МБ и в Git не хранится.
+
+### Как скачать модель
+1. Откройте папку на Google Диске:
+   https://drive.google.com/drive/folders/1nt6WPqAEULUNJTv6Z0ElhfR5GhmrQ6Ch?usp=sharing
+2. Скачайте архив с моделью и распакуйте его в корень проекта (`MyPsychoBot`) так,
+   чтобы получилась структура:
+```MyPsychoBot/
+└── models/
+└── rubert_classifier/
+├── config.json
+├── model.safetensors
+├── inference_config.json
+├── class_mapping.json
+└── файлы токенизатора
+```
+3. Проверьте загрузку:
+   ```bash
+   python bot/classifier.py
+   ```
+   Должны вывестись порог уверенности и три примера с классами.
+
+Без модели бот запускается на `MockModel` и пишет об этом предупреждение в консоль.
 ## Отправка изменений на GitHub
 
 Git-репозиторий бота находится в папке `MyPsychoBot`. Все команды Git
