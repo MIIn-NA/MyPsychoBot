@@ -7,12 +7,13 @@ from aiogram.filters import Command
 
 # Импортируем наши модули
 from mock_model import MockModel
+from classifier import RuBertClassifier, ModelLoadError  # ДАША
 from knowledge_base import KnowledgeBase
 from solver import Solver
 import os
 from dotenv import load_dotenv
 
-load_dotenv() 
+load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -20,8 +21,16 @@ TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Инициализация решателя с моделью-заглушкой и базой знаний
-solver = Solver(model=MockModel(), knowledge_base=KnowledgeBase())
+# выбор модели. RuBERT, а если он не обучен, то прежняя MockModel
+def build_model():
+    try:
+        return RuBertClassifier()
+    except ModelLoadError as error:
+        logging.warning("RuBERT недоступен (%s). Используется MockModel.", error)
+        return MockModel()
+
+# Инициализация решателя с моделью и базой знаний
+solver = Solver(model=build_model(), knowledge_base=KnowledgeBase())  # ДАША
 
 # Обработчик команды /start
 @dp.message(Command("start"))
