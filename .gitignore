@@ -16,6 +16,7 @@ db/*
 
 # Обученная модель RuBERT
 model/
+models/rubert_classifier/
 
 
 # Служебные файлы ОС
