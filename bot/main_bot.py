@@ -8,11 +8,10 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 
 # Импортируем модули команды
-from solver import Solver
-from classifier import RuBertClassifier, ModelLoadError
+from solver import Solver, SolverError, TextTooLongError
 from mock_model import MockModel
 from knowledge_base import KnowledgeBase
-from storage import Storage
+from storage import Storage, StorageError, StorageInitializationError
 from statistics_service import StatisticsService
 
 load_dotenv()
@@ -23,17 +22,32 @@ dp = Dispatcher()
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
 def build_model():
+    if os.getenv("BOT_DEMO_MODE", "").strip() == "1":
+        logging.warning("Включён демонстрационный режим MockModel.")
+        return MockModel()
+    # Импорт отложен: бот может ответить о недоступности анализа даже без
+    # установленных зависимостей RuBERT.
+    try:
+        from classifier import RuBertClassifier, ModelLoadError
+    except ImportError:
+        logging.error("Недоступны зависимости RuBERT.")
+        return None
     try:
         return RuBertClassifier()
-    except ModelLoadError as error:
-        logging.warning("RuBERT недоступен (%s). Используется MockModel.", error)
-        return MockModel()
+    except ModelLoadError:
+        logging.error("RuBERT не удалось загрузить.")
+        return None
 
 model = build_model()
 kb = KnowledgeBase()
-solver = Solver(model=model, knowledge_base=kb)
+solver = (
+    Solver(model=model, knowledge_base=kb,
+           threshold=getattr(model, "low_confidence_threshold", 0.60))
+    if model is not None else None
+)
 
-storage = Storage("psycho_bot.db")
+# Запись, личная статистика и StatisticsService используют одну базу.
+storage = Storage()
 stats_service = StatisticsService(storage)
 
 user_states = {}
@@ -131,15 +145,11 @@ async def cmd_fact(message: types.Message):
 @dp.message(F.text == "Моя статистика 📊")
 async def cmd_my_stats(message: types.Message):
     user_id = message.from_user.id
-    import aiosqlite
     try:
-        async with aiosqlite.connect("psycho_bot.db") as db:
-            query = "SELECT predicted_class, COUNT(*) FROM results WHERE user_id = ? GROUP BY predicted_class"
-            async with db.execute(query, (user_id,)) as cursor:
-                stats = dict(await cursor.fetchall())
-            async with db.execute("SELECT COUNT(*) FROM results WHERE user_id = ?", (user_id,)) as cursor:
-                total = (await cursor.fetchone())[0]
-    except Exception:
+        counts = await storage.get_user_class_counts(user_id)
+        total = sum(counts.values())
+    except Exception as error:
+        logging.error("Ошибка чтения личной статистики (%s).", type(error).__name__)
         await message.answer("Ошибка при чтении базы данных.", reply_markup=get_main_keyboard())
         return
 
@@ -147,9 +157,9 @@ async def cmd_my_stats(message: types.Message):
         await message.answer("У вас пока нет сохраненных результатов. Напишите мне, как вы себя чувствуете!", reply_markup=get_main_keyboard())
         return
 
-    norm = stats.get(0, 0)
-    stress = stats.get(1, 0)
-    anxiety = stats.get(2, 0)
+    norm = counts.get(0, 0)
+    stress = counts.get(1, 0)
+    anxiety = counts.get(2, 0)
     
     text = (
         "📊 **Твоя личная статистика**\n\n"
@@ -170,52 +180,23 @@ async def handle_context_button(message: types.Message):
     text = message.text
     state = user_states.get(user_id, {"previous_text": "", "clarification_count": 1, "awaiting_clarification": False, "awaiting_feedback": False})
 
+    user_states[user_id] = state
     if text == "Отмена":
+        state["awaiting_clarification"] = False
+        state["awaiting_feedback"] = False
+        state["previous_text"] = ""
+        state["clarification_count"] = 0
         await message.answer("Хорошо, давай вернемся к началу.", reply_markup=get_main_keyboard())
         return
 
-    # Принудительно задаем класс и текст для базы знаний
-    if text == "Из-за учебы (сессия)":
-        predicted_class = 1
-        kb_text = "экзамен сессия дедлайн учеба"
-    elif text == "Из-за отношений":
-        predicted_class = 2
-        kb_text = "отношения конфликт"
-    elif text == "Проблемы со сном / недосып":
-        predicted_class = 2
-        kb_text = "сон бессонница"
-    elif text == "Будущее (работа, планы)":
-        predicted_class = 2
-        kb_text = "будущее работа"
-    else: # Просто выгорание
-        predicted_class = 1
-        kb_text = "устал выгорание"
+    if not state.get("awaiting_clarification"):
+        await message.answer("Напишите новое описание своего состояния.", reply_markup=get_main_keyboard())
+        return
 
-    # Получаем совет из базы знаний напрямую
-    advice = kb.get_recommendation(kb_text, predicted_class)
-    
-    # Собираем ответ вручную (не трогаем объект SolverResult)
-    class_names = {0: "Норма", 1: "Стресс", 2: "Тревога"}
-    state_name = class_names[predicted_class]
-    
-    response = f"Я определил твое состояние как: **{state_name}**\n\n"
-    response += f"💡 Совет: {advice}\n\n"
-    response += "Стало ли тебе немного легче после этого совета? Или хочешь рассказать подробнее?"
-    
-    await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard())
-    
-    # Сохраняем в БД
-    try:
-        today = datetime.date.today().isoformat()
-        await storage.save_result(
-            user_id=message.from_user.id, group=1, analysis_date=today,
-            predicted_class=predicted_class, model_confidence=1.0, advice=advice
-        )
-    except Exception as e:
-        logging.error(f"Ошибка БД: {e}")
-        
-    # Ставим флаг, что ждем фидбек на совет
-    state["awaiting_feedback"] = True
+    # Контекст уточняет текст, а класс по-прежнему определяет модель.
+    combined_text = f"{state['previous_text']} {text}"
+    state["clarification_count"] += 1
+    await process_solver(message, combined_text, state)
 
 
 # --- ОСНОВНАЯ ЛОГИКА ДИАЛОГА ---
@@ -223,17 +204,23 @@ async def handle_context_button(message: types.Message):
 @dp.message(~Command(commands=["start", "help", "exercise", "fact", "stats"]), F.text, ~F.text.in_({"Упражнения 🧘‍♀️", "Интересный факт 💡", "Помощь ❓", "Моя статистика 📊"}))
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
-    text = message.text.lower()
+    text = message.text
     
     if user_id not in user_states:
         user_states[user_id] = {"previous_text": "", "clarification_count": 0, "awaiting_clarification": False, "awaiting_feedback": False}
         
     state = user_states[user_id]
-    
+    if not isinstance(text, str) or not text.strip():
+        await message.answer(
+            "Сообщение пустое. Напишите, что происходит и как вы себя чувствуете.",
+            reply_markup=get_context_keyboard() if state.get("awaiting_clarification") else get_main_keyboard(),
+        )
+        return
+
     # Если ждем реакции на совет
     if state.get("awaiting_feedback"):
         state["awaiting_feedback"] = False 
-        if any(word in text for word in ["да", "легче", "лучше", "спасибо"]):
+        if any(word in text.lower() for word in ["да", "легче", "лучше", "спасибо"]):
             await message.answer("Я очень рад, что смог помочь! Если что-то еще случится, я всегда на связи. 😊", reply_markup=get_main_keyboard())
         else:
             await message.answer("Мне жаль, что всё еще тяжело. Иногда нужно время. Попробуй выполнить упражнение из меню или написать мне еще раз, чтобы я подобрал другой совет.", reply_markup=get_main_keyboard())
@@ -253,66 +240,78 @@ async def handle_message(message: types.Message):
 
 
 async def process_solver(message: types.Message, text: str, state: dict):
-    # Вызываем Солвер Тани
-    result = solver.solve(text)
-    
-    predicted_class = result.predicted_class
-    confidence = result.confidence
-    
-    # Защита от ошибок модели
-    text_lower = text.lower()
-    negative_words = ["плохо", "сложно", "тяжело", "ужасно", "не могу", "достало", "бесит", "устал", "не хочу", "грустно", "тревожно", "бессонница", "учеб", "сесси", "экзамен", "дедлайн"]
-    
-    if any(word in text_lower for word in negative_words):
-        if "сон" in text_lower or "бессонница" in text_lower:
-            predicted_class = 2
-        elif "учеб" in text_lower or "сесси" in text_lower or "экзамен" in text_lower or "дедлайн" in text_lower:
-            predicted_class = 1
-        else:
-            predicted_class = 1
-        confidence = 0.50
-    
-    # Если уверенность низкая, спрашиваем кнопками
-    if confidence < 0.60 and state.get("clarification_count", 0) == 0:
-        state["awaiting_clarification"] = True
-        state["previous_text"] = text
-        
-        if predicted_class in [1, 2]:
-            question = ("Я замечаю, что тебе сейчас нелегко. Чтобы я мог дать более подходящий совет, "
-                        "выбери, что сейчас больше всего давит:")
-            await message.answer(question, reply_markup=get_context_keyboard())
-        else:
-            question = ("Ты кажешься спокойным, но я хочу убедиться. Что-то происходит в последнее время?")
-            await message.answer(question, reply_markup=get_main_keyboard())
+    if solver is None:
+        state.update(previous_text="", awaiting_clarification=False, awaiting_feedback=False,
+                     clarification_count=0)
+        await message.answer("Анализ сейчас недоступен. Попробуйте позже.", reply_markup=get_main_keyboard())
         return
-    
-    # Выдаем результат
-    state["awaiting_clarification"] = False
-    state["awaiting_feedback"] = True
-    
+    try:
+        result = solver.solve(text)
+    except TextTooLongError as error:
+        # Повторный ввод заменяет всё слишком длинное объединённое описание.
+        state.update(previous_text="", awaiting_clarification=False, awaiting_feedback=False,
+                     clarification_count=0)
+        await message.answer(str(error), reply_markup=get_main_keyboard())
+        return
+    except (TypeError, ValueError):
+        await message.answer(
+            "Сообщение пустое или некорректное. Напишите, что происходит и как вы себя чувствуете.",
+            reply_markup=get_main_keyboard(),
+        )
+        return
+    except SolverError:
+        logging.error("Ошибка предсказания модели; анализ недоступен.")
+        state.update(previous_text="", awaiting_clarification=False, awaiting_feedback=False,
+                     clarification_count=0)
+        await message.answer("Анализ сейчас недоступен. Попробуйте позже.", reply_markup=get_main_keyboard())
+        return
+
+    first_preliminary = result.is_preliminary and state.get("clarification_count", 0) == 0
+    response = result.to_message(offer_clarification=first_preliminary)
+    if os.getenv("BOT_DEMO_MODE", "").strip() == "1":
+        response = "Демонстрационный режим (MockModel).\n\n" + response
+    if result.is_preliminary:
+        state["awaiting_feedback"] = False
+        state["awaiting_clarification"] = first_preliminary
+        if first_preliminary:
+            state["previous_text"] = text
+            response += "\nМожно выбрать тему уточнения кнопкой ниже."
+        else:
+            state["previous_text"] = ""
+            state["clarification_count"] = 0
+            response += "\n\nОценка остаётся предварительной. Напишите новое сообщение, чтобы начать новый анализ."
+        await message.answer(
+            response, parse_mode="Markdown",
+            reply_markup=get_context_keyboard() if first_preliminary else get_main_keyboard(),
+        )
+        return
+
+    state.update(previous_text="", awaiting_clarification=False, awaiting_feedback=True,
+                 clarification_count=0)
+    response += "\n\nСтало ли тебе немного легче после этого совета? Или хочешь рассказать подробнее?"
     try:
         today = datetime.date.today().isoformat()
+        # Ограничение: до подключения учебных групп все записи относятся к группе 1.
         await storage.save_result(
             user_id=message.from_user.id, group=1, analysis_date=today,
-            predicted_class=predicted_class, model_confidence=confidence, advice=result.advice
+            predicted_class=result.predicted_class, model_confidence=result.confidence, advice=result.advice
         )
-    except Exception as e:
-        logging.error(f"Ошибка БД: {e}")
+    except StorageError as error:
+        logging.error("Ошибка записи результата в SQLite: %s", error)
+    except Exception as error:
+        logging.error("Ошибка записи результата в SQLite (%s).", type(error).__name__)
 
-    class_names = {0: "Норма", 1: "Стресс", 2: "Тревога"}
-    state_name = class_names.get(predicted_class, "Неизвестно")
-    
-    response = f"Я определил твое состояние как: **{state_name}** (уверенность: {int(confidence*100)}%)\n\n"
-    response += f"💡 Совет: {result.advice}\n\n"
-    response += "Стало ли тебе немного легче после этого совета? Или хочешь рассказать подробнее?"
-    
     await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 
 # --- ЗАПУСК ---
 async def main():
-    await storage.init_table()
     logging.basicConfig(level=logging.INFO)
+    try:
+        await storage.init_table()
+    except StorageInitializationError as error:
+        logging.error("Запуск бота отменён: %s", error)
+        return
     print("Бот запущен! Жду сообщений...")
     await dp.start_polling(bot)
 

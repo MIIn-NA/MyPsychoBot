@@ -9,6 +9,11 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+if __package__:
+    from .errors import ClassificationError, TextTooLongError
+else:
+    from errors import ClassificationError, TextTooLongError
+
 MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "rubert_classifier"
 
 CLASS_NAMES = {0: "норма", 1: "стресс", 2: "тревога"}
@@ -16,10 +21,6 @@ CLASS_NAMES = {0: "норма", 1: "стресс", 2: "тревога"}
 
 class ModelLoadError(RuntimeError):
     """Не удалось загрузить модель."""
-
-
-class ClassificationError(RuntimeError):
-    """Не удалось классифицировать сообщение."""
 
 
 def clean_text(text):
@@ -49,6 +50,8 @@ class RuBertClassifier:
 
             self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
             self.model = AutoModelForSequenceClassification.from_pretrained(model_dir)
+            # Учитываем и настройку инференса, и физический лимит RuBERT.
+            self.max_length = min(self.max_length, self.model.config.max_position_embeddings)
             self.model.to(self.device)
             self.model.eval()
         except Exception as error:
@@ -64,10 +67,14 @@ class RuBertClassifier:
         try:
             inputs = self.tokenizer(
                 text,
-                truncation=True,
-                max_length=self.max_length,
+                add_special_tokens=True,
+                truncation=False,
                 return_tensors="pt",
-            ).to(self.device)
+            )
+            token_count = inputs["input_ids"].shape[-1]
+            if token_count > self.max_length:
+                raise TextTooLongError(token_count, self.max_length)
+            inputs = inputs.to(self.device)
 
             with torch.no_grad():
                 logits = self.model(**inputs).logits
@@ -76,6 +83,8 @@ class RuBertClassifier:
             label = int(torch.argmax(probabilities))
 
             return label, float(probabilities[label])
+        except TextTooLongError:
+            raise
         except Exception as error:
             raise ClassificationError(f"Ошибка классификации: {error}") from error
 
