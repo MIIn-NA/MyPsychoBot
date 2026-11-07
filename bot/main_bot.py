@@ -2,59 +2,42 @@ import asyncio
 import logging
 import os
 import random
-import sqlite3
-from datetime import datetime
 from dotenv import load_dotenv
-
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command
 
-# Импортируем наши модули
-from real_model import RealModel
+# Импортируем то, что сделали девочки
+from solver import Solver
+from classifier import RuBertClassifier, ModelLoadError
+from mock_model import MockModel
 from knowledge_base import KnowledgeBase
+from storage import Storage
+from statistics_service import StatisticsService
 
-# Загружаем токен
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
-# Инициализация бота
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Инициализация модели и базы
-model = RealModel()
+# --- ИНИЦИАЛИЗАЦИЯ МОДЕЛИ И СЕРВИСОВ ---
+def build_model():
+    try:
+        return RuBertClassifier()
+    except ModelLoadError as error:
+        logging.warning("RuBERT недоступен (%s). Используется MockModel.", error)
+        return MockModel()
+
+# Инициализируем всё, что нужно для работы
+model = build_model()
 kb = KnowledgeBase()
+solver = Solver(model=model, knowledge_base=kb)
 
-# --- БАЗА ДАННЫХ ---
-def init_db():
-    conn = sqlite3.connect('psycho_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            username TEXT,
-            text TEXT,
-            predicted_class INTEGER,
-            confidence REAL,
-            timestamp TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+# Инициализируем хранилище для статистики
+storage = Storage("db/psycho_bot.db")
+stats_service = StatisticsService(storage)
 
-def save_result(user_id, username, text, predicted_class, confidence):
-    conn = sqlite3.connect('psycho_bot.db')
-    cursor = conn.cursor()
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute('''
-        INSERT INTO results (user_id, username, text, predicted_class, confidence, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (user_id, username, text, predicted_class, confidence, timestamp))
-    conn.commit()
-    conn.close()
-
-init_db()
+# Память для диалога
 user_states = {}
 
 # --- КЛАВИАТУРА ---
@@ -91,8 +74,7 @@ async def cmd_help(message: types.Message):
         "📝 **Как я работаю:**\n"
         "Напиши мне любое сообщение о том, как ты себя чувствуешь.\n"
         "Например: «Я устал от учебы» или «Боюсь завалить экзамен».\n\n"
-        "Я анализирую текст с помощью нейросети RuBERT и подбираю рекомендацию.\n\n"
-        "Ты также можешь использовать кнопки внизу экрана."
+        "Я анализирую текст с помощью нейросети RuBERT и подбираю рекомендацию."
     )
     await message.answer(text, parse_mode="Markdown")
 
@@ -130,36 +112,21 @@ async def cmd_fact(message: types.Message):
     ]
     await message.answer(random.choice(facts))
 
+# Команда статистики (используем код Тани)
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
-    conn = sqlite3.connect('psycho_bot.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM results")
-    total = cursor.fetchone()[0]
-    cursor.execute("SELECT predicted_class, COUNT(*) FROM results GROUP BY predicted_class")
-    stats = dict(cursor.fetchall())
-    conn.close()
-    
-    norm = stats.get(0, 0)
-    stress = stats.get(1, 0)
-    anxiety = stats.get(2, 0)
-    
-    text = (
-        "📊 **Статистика мониторинга**\n\n"
-        f"Всего сообщений: **{total}**\n\n"
-        f"🟢 Норма: {norm} ({int(norm/total*100) if total else 0}%)\n"
-        f"🟡 Стресс: {stress} ({int(stress/total*100) if total else 0}%)\n"
-        f"🔴 Тревога: {anxiety} ({int(anxiety/total*100) if total else 0}%)"
-    )
-    await message.answer(text, parse_mode="Markdown")
+    # Для теста берем группу 1 и текущую дату (можно потом доработать под ввод пользователя)
+    # Таня написала асинхронный метод get_summary
+    summary = await stats_service.get_summary(group_name=1, start_date="2026-11-01", end_date="2026-11-30")
+    await message.answer(summary)
 
 
-# --- ЛОГИКА ДИАЛОГА (ТОЛЬКО ДЛЯ ОБЫЧНОГО ТЕКСТА) ---
-# Самая главная строчка: мы явно говорим НЕ обрабатывать команды и кнопки
+# --- ЛОГИКА ДИАЛОГА ---
+
 @dp.message(~Command(commands=["start", "help", "exercise", "fact", "stats"]), F.text, ~F.text.in_({"Упражнения 🧘‍♀️", "Интересный факт 💡", "Помощь ❓"}))
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
-    text = message.text.lower()
+    text = message.text
     
     if user_id not in user_states:
         user_states[user_id] = {
@@ -171,52 +138,32 @@ async def handle_message(message: types.Message):
         
     state = user_states[user_id]
     
+    # Если бот ждет уточнения, склеиваем текст
     if state.get("awaiting_clarification"):
         combined_text = f"{state['previous_text']} {text}"
         state["clarification_count"] += 1
         state["awaiting_clarification"] = False
-        await analyze_and_respond(message, combined_text, state)
+        await process_solver(message, combined_text, state)
         return
 
+    # Обычная обработка
     state["clarification_count"] = 0
     state["previous_text"] = text
-    await analyze_and_respond(message, text, state)
+    await process_solver(message, text, state)
 
-async def analyze_and_respond(message: types.Message, text: str, state: dict):
-    predicted_class, confidence = model.predict(text)
+async def process_solver(message: types.Message, text: str, state: dict):
+    # Вызываем Solver Тани!
+    result = solver.solve(text)
     
-    # Логика ответов на уточнения
-    if state.get("last_question_topic"):
-        topic = state["last_question_topic"]
-        if any(word in text for word in ["да", "учеба", "учеб", "лаба", "экзамен", "сессия"]):
-            if topic == "stress":
-                predicted_class = 1
-                confidence = 0.95
-            elif topic == "anxiety":
-                predicted_class = 2
-                confidence = 0.95
-                
-            state["last_question_topic"] = None
-            advice = kb.get_recommendation(text, predicted_class)
-            class_names = {0: "Норма", 1: "Стресс", 2: "Тревога"}
-            state_name = class_names[predicted_class]
-            
-            save_result(message.from_user.id, message.from_user.username, text, predicted_class, confidence)
-            
-            response = f"Понял тебя. Твое состояние: **{state_name}** (уверенность: {int(confidence*100)}%)\n\n"
-            response += f"💡 Совет: {advice}"
-            await message.answer(response, parse_mode="Markdown")
-            return
-
-    # Если модель не уверена
-    if confidence < 0.60 and state["clarification_count"] < 2:
+    # Проверяем, уверена ли модель
+    if result.confidence < 0.60 and state["clarification_count"] < 2:
         state["awaiting_clarification"] = True
         
         if state["clarification_count"] == 0:
-            if predicted_class == 1:
+            if result.predicted_class == 1:
                 question = "Я замечаю признаки стресса. Это связано с учебой или с чем-то личным?"
                 state["last_question_topic"] = "stress"
-            elif predicted_class == 2:
+            elif result.predicted_class == 2:
                 question = "Похоже на тревогу. Ты переживаешь из-за экзаменов или есть другая причина?"
                 state["last_question_topic"] = "anxiety"
             else:
@@ -229,23 +176,32 @@ async def analyze_and_respond(message: types.Message, text: str, state: dict):
         await message.answer(f"🤔 {question}")
         return
     
-    # Выдача результата
+    # Если уверенность высокая, выдаем результат (используем result.to_message() от Тани)
     state["awaiting_clarification"] = False
     state["last_question_topic"] = None
     
-    save_result(message.from_user.id, message.from_user.username, text, predicted_class, confidence)
-    
-    advice = kb.get_recommendation(text, predicted_class)
-    class_names = {0: "Норма", 1: "Стресс", 2: "Тревога"}
-    state_name = class_names[predicted_class]
-    
-    response = f"Я определил твое состояние как: **{state_name}** (уверенность: {int(confidence*100)}%)\n\n"
-    response += f"💡 Совет: {advice}"
-    
-    await message.answer(response, parse_mode="Markdown")
+    # Сохраняем в БД (функция из кода Тани)
+    try:
+        # В коде Тани Storage.save_result асинхронный
+        await storage.save_result(
+            user_id=message.from_user.id,
+            group=1, # Заглушка, нужна группа студента
+            analysis_date="2026-11-07", # Заглушка, нужна реальная дата
+            predicted_class=result.predicted_class,
+            model_confidence=result.confidence,
+            advice=result.advice
+        )
+    except Exception as e:
+        logging.error(f"Ошибка сохранения в БД: {e}")
+
+    # Отправляем ответ студенту
+    await message.answer(result.to_message(), parse_mode="Markdown")
 
 # --- ЗАПУСК ---
 async def main():
+    # Инициализируем таблицу БД при старте
+    await storage.init_table()
+    
     logging.basicConfig(level=logging.INFO)
     print("Бот запущен! Жду сообщений в Telegram...")
     await dp.start_polling(bot)
