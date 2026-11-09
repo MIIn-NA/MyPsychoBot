@@ -13,12 +13,12 @@
     "precision_macro": 0.9700546885420834,
     "recall_macro": 0.9698653198653199,
     "f1_macro": 0.9698472208510847,
-    "average_inference_time_seconds": 0.05331884228175931,
+    "average_inference_time_seconds": 0.02750238154361637,
     "confidence_threshold": {
         "threshold": 0.6,
-        "target_precision": 0.8,
-        "achieved_accuracy": 0.9563758389261745,
-        "coverage": 1.0,
+        "target_accuracy": 0.8,
+        "achieved_accuracy": 0.9594594594594594,
+        "coverage": 0.9932885906040269,
         "target_reached": true
     },
     "classification_report": {

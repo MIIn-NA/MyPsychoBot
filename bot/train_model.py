@@ -1,3 +1,4 @@
+
 """
 Ответственная: Даша.
 Назначение: подготовка данных, обучение и оценка модели RuBERT.
@@ -32,6 +33,7 @@ DATA_PATH = PROJECT_DIR / "data" / "data.csv"
 MODEL_DIR = PROJECT_DIR / "models" / "rubert_classifier"
 RESULTS_DIR = PROJECT_DIR / "results"
 
+
 # Параметры модели
 MODEL_NAME = "DeepPavlov/rubert-base-cased"
 
@@ -59,8 +61,8 @@ BATCH_SIZE = 8
 EPOCHS = 3
 LEARNING_RATE = 2e-5
 
-TARGET_PRECISION = 0.80
-MIN_THRESHOLD = 0.6  # порог низкой уверенности не ниже этого значения
+TARGET_ACCURACY = 0.80
+MIN_THRESHOLD = 0.6  # Минимальный порог уверенности
 
 DEVICE = torch.device(
     "cuda" if torch.cuda.is_available() else "cpu"
@@ -152,6 +154,7 @@ def load_data():
             )
 
     print("\nРаспределение классов:")
+
     for class_id, name in CLASS_NAMES.items():
         print(f"{class_id} — {name}: {counts.get(class_id, 0)}")
 
@@ -283,17 +286,24 @@ def evaluate_model(model, loader):
 def find_confidence_threshold(labels, predictions, probabilities):
     confidences = probabilities.max(axis=1)
 
-    best_threshold = 0.0
+    best_threshold = None
     best_coverage = -1.0
     best_accuracy = 0.0
 
-    candidates = np.unique(confidences)
+    # Рассматриваем пороги не ниже MIN_THRESHOLD
+    candidates = np.unique(
+        np.append(
+            confidences[confidences >= MIN_THRESHOLD],
+            MIN_THRESHOLD,
+        )
+    )
 
     for threshold in candidates:
         accepted = confidences >= threshold
 
         coverage = accepted.mean()
 
+        # Требуем, чтобы модель принимала не менее 50% сообщений
         if coverage < 0.50:
             continue
 
@@ -302,30 +312,49 @@ def find_confidence_threshold(labels, predictions, probabilities):
             predictions[accepted],
         )
 
-        if accuracy >= TARGET_PRECISION:
+        # Выбираем порог с максимальным покрытием,
+        # при котором достигнута целевая Accuracy
+        if accuracy >= TARGET_ACCURACY:
             if coverage > best_coverage:
                 best_threshold = float(threshold)
                 best_coverage = float(coverage)
                 best_accuracy = float(accuracy)
 
-    if best_coverage < 0:
+    # Если целевая Accuracy не достигнута
+    if best_threshold is None:
+        best_threshold = MIN_THRESHOLD
+
+        accepted = confidences >= best_threshold
+        coverage = float(accepted.mean())
+
+        if accepted.any():
+            best_accuracy = float(
+                accuracy_score(
+                    labels[accepted],
+                    predictions[accepted],
+                )
+            )
+        else:
+            best_accuracy = None
+
         print(
             "\nПредупреждение: не удалось достичь "
-            f"точности {TARGET_PRECISION:.0%} "
-            "при покрытии не менее 50%."
+            f"Accuracy {TARGET_ACCURACY:.0%} "
+            "при покрытии не менее 50%. "
+            f"Используется минимальный порог {MIN_THRESHOLD:.2f}."
         )
 
         return {
-            "threshold": 0.0,
-            "target_precision": TARGET_PRECISION,
-            "achieved_accuracy": None,
-            "coverage": 1.0,
+            "threshold": best_threshold,
+            "target_accuracy": TARGET_ACCURACY,
+            "achieved_accuracy": best_accuracy,
+            "coverage": coverage,
             "target_reached": False,
         }
 
     return {
         "threshold": best_threshold,
-        "target_precision": TARGET_PRECISION,
+        "target_accuracy": TARGET_ACCURACY,
         "achieved_accuracy": best_accuracy,
         "coverage": best_coverage,
         "target_reached": True,
@@ -449,7 +478,10 @@ def train_model():
         )
 
         print(f"Training loss: {average_loss:.4f}")
-        print(f"Validation accuracy: {accuracy_score(labels, predictions):.4f}")
+        print(
+            f"Validation accuracy: "
+            f"{accuracy_score(labels, predictions):.4f}"
+        )
         print(f"Validation F1: {f1:.4f}")
 
         history.append({
@@ -484,11 +516,6 @@ def train_model():
         val_labels,
         val_predictions,
         val_probabilities,
-    )
-
-    # Порог не опускаем ниже разумного значения
-    threshold_info["threshold"] = max(
-        threshold_info["threshold"], MIN_THRESHOLD
     )
 
     # Итоговая оценка на тестовой выборке
@@ -660,6 +687,21 @@ def train_model():
     print(
         f"\nПорог уверенности: "
         f"{threshold_info['threshold']:.4f}"
+    )
+
+    print(
+        f"Целевая Accuracy достигнута: "
+        f"{threshold_info['target_reached']}"
+    )
+
+    print(
+        f"Accuracy при выбранном пороге: "
+        f"{threshold_info['achieved_accuracy']}"
+    )
+
+    print(
+        f"Покрытие: "
+        f"{threshold_info['coverage']:.2%}"
     )
 
     print(f"\nМодель сохранена: {MODEL_DIR}")
