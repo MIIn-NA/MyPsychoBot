@@ -1,80 +1,80 @@
 {
     "model_name": "DeepPavlov/rubert-base-cased",
     "device": "cpu",
-    "dataset_size": 1500,
-    "train_size": 1050,
-    "validation_size": 225,
-    "test_size": 225,
+    "dataset_size": 1986,
+    "train_size": 1390,
+    "validation_size": 298,
+    "test_size": 298,
     "epochs": 3,
     "batch_size": 8,
     "learning_rate": 2e-05,
     "max_length": 64,
-    "accuracy": 0.9688888888888889,
-    "precision_macro": 0.9688857278330962,
-    "recall_macro": 0.9688888888888889,
-    "f1_macro": 0.9688584677837534,
-    "average_inference_time_seconds": 0.03290349244450529,
+    "accuracy": 0.9697986577181208,
+    "precision_macro": 0.9700546885420834,
+    "recall_macro": 0.9698653198653199,
+    "f1_macro": 0.9698472208510847,
+    "average_inference_time_seconds": 0.05331884228175931,
     "confidence_threshold": {
-        "threshold": 0.6282788515090942,
+        "threshold": 0.6,
         "target_precision": 0.8,
-        "achieved_accuracy": 0.9777777777777777,
+        "achieved_accuracy": 0.9563758389261745,
         "coverage": 1.0,
         "target_reached": true
     },
     "classification_report": {
         "норма": {
-            "precision": 0.972972972972973,
-            "recall": 0.96,
-            "f1-score": 0.9664429530201343,
-            "support": 75.0
+            "precision": 0.9897959183673469,
+            "recall": 0.9797979797979798,
+            "f1-score": 0.9847715736040609,
+            "support": 99.0
         },
         "стресс": {
-            "precision": 0.96,
-            "recall": 0.96,
-            "f1-score": 0.96,
-            "support": 75.0
+            "precision": 0.9693877551020408,
+            "recall": 0.95,
+            "f1-score": 0.9595959595959596,
+            "support": 100.0
         },
         "тревога": {
-            "precision": 0.9736842105263158,
-            "recall": 0.9866666666666667,
-            "f1-score": 0.9801324503311258,
-            "support": 75.0
+            "precision": 0.9509803921568627,
+            "recall": 0.9797979797979798,
+            "f1-score": 0.9651741293532339,
+            "support": 99.0
         },
-        "accuracy": 0.9688888888888889,
+        "accuracy": 0.9697986577181208,
         "macro avg": {
-            "precision": 0.9688857278330962,
-            "recall": 0.9688888888888889,
-            "f1-score": 0.9688584677837534,
-            "support": 225.0
+            "precision": 0.9700546885420834,
+            "recall": 0.9698653198653199,
+            "f1-score": 0.9698472208510847,
+            "support": 298.0
         },
         "weighted avg": {
-            "precision": 0.9688857278330963,
-            "recall": 0.9688888888888889,
-            "f1-score": 0.9688584677837533,
-            "support": 225.0
+            "precision": 0.9700524505104055,
+            "recall": 0.9697986577181208,
+            "f1-score": 0.9698128206455305,
+            "support": 298.0
         }
     },
     "training_history": [
         {
             "epoch": 1,
-            "training_loss": 0.5982085965489122,
-            "validation_precision": 0.9735087719298244,
-            "validation_recall": 0.9733333333333333,
-            "validation_f1": 0.9733920026075232
+            "training_loss": 0.5367722694398086,
+            "validation_precision": 0.9262208533778549,
+            "validation_recall": 0.9261279461279462,
+            "validation_f1": 0.9261585728742331
         },
         {
             "epoch": 2,
-            "training_loss": 0.10301987934067394,
-            "validation_precision": 0.9779973924710768,
-            "validation_recall": 0.9777777777777779,
-            "validation_f1": 0.9776826961759492
+            "training_loss": 0.10154073060243979,
+            "validation_precision": 0.9565925980353137,
+            "validation_recall": 0.9563636363636364,
+            "validation_f1": 0.9564303752263857
         },
         {
             "epoch": 3,
-            "training_loss": 0.048853970379709746,
-            "validation_precision": 0.973323720259553,
-            "validation_recall": 0.9733333333333333,
-            "validation_f1": 0.9732414533739037
+            "training_loss": 0.02719984699412645,
+            "validation_precision": 0.9570330984961295,
+            "validation_recall": 0.9563973063973062,
+            "validation_f1": 0.9565259247013135
         }
     ]
 }
