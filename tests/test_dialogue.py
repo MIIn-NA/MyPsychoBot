@@ -25,6 +25,7 @@ def handlers():
             selected.append(node)
     namespace = dict(types=SimpleNamespace(Message=object), os=os,
                      datetime=datetime, logging=Mock(), user_states={},
+                     DEFAULT_GROUP_ID=1,
                      SolverError=SolverError, TextTooLongError=TextTooLongError, StorageError=StorageError,
                      MockModel=MockModel, storage=SimpleNamespace(save_result=AsyncMock()),
                      get_main_keyboard=lambda: 'main', get_context_keyboard=lambda: 'context')
@@ -149,6 +150,35 @@ class DialogueTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.ns['user_states'][1]['awaiting_clarification'])
         self.assertEqual(self.ns['user_states'][1]['previous_text'], 'Исходный текст')
         self.model.predict.assert_called_once()
+
+    async def test_vague_distress_asks_for_context_before_predicting_or_saving(self):
+        self.model.predict.return_value = (1, .90)
+        first = await self.send('Всё плохо!')
+        self.assertIn('нелегко', first.args[0])
+        self.assertEqual(first.kwargs['reply_markup'], 'context')
+        self.model.predict.assert_not_called()
+        self.ns['storage'].save_result.assert_not_awaited()
+
+        final = await self.send('Из-за учебы (сессия)', button=True)
+        self.model.predict.assert_called_once_with('Всё плохо! Из-за учебы (сессия)')
+        self.assertIn('Стресс', final.args[0])
+        self.assertEqual(final.kwargs['reply_markup'], 'main')
+        self.ns['storage'].save_result.assert_awaited_once()
+
+    async def test_vague_distress_and_all_context_buttons_in_demo_mode(self):
+        self.ns['solver'] = Solver(MockModel(), KnowledgeBase())
+        for topic, expected in (
+            ('Из-за учебы (сессия)', 'Стресс'),
+            ('Из-за отношений', 'Тревога'),
+            ('Проблемы со сном / недосып', 'Тревога'),
+            ('Будущее (работа, планы)', 'Тревога'),
+            ('Просто выгорание', 'Стресс'),
+        ):
+            with self.subTest(topic=topic):
+                first = await self.send('все плохо')
+                self.assertEqual(first.kwargs['reply_markup'], 'context')
+                final = await self.send(topic, button=True)
+                self.assertIn(expected, final.args[0])
 
     async def test_predict_failure_and_unavailable_model(self):
         self.model.predict.side_effect = RuntimeError('internal secret')

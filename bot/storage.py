@@ -179,7 +179,7 @@ class Storage:
         """Записи группы за включительный период, по дате и id.
 
         [] означает успешную выборку без записей; ошибки чтения передаются
-        вызывающему коду. Агрегация и проверка роли выполняются вне Storage.
+        вызывающему коду. Агрегация выполняется вне Storage.
         """
         start = _parse_iso_date(start_date, "get_results: start_date")
         end = _parse_iso_date(end_date, "get_results: end_date")

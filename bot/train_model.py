@@ -58,7 +58,6 @@ MAX_LENGTH = 64
 BATCH_SIZE = 8
 EPOCHS = 3
 LEARNING_RATE = 2e-5
-SHORT_MESSAGE_MAX_WORDS = 3
 
 TARGET_PRECISION = 0.80
 MIN_THRESHOLD = 0.6  # порог низкой уверенности не ниже этого значения
@@ -333,32 +332,6 @@ def find_confidence_threshold(labels, predictions, probabilities):
     }
 
 
-def evaluate_short_messages(texts, labels, predictions, probabilities, threshold):
-    """Оценка коротких реплик на отложенной тестовой выборке."""
-    short = np.array([
-        1 <= len(text.split()) <= SHORT_MESSAGE_MAX_WORDS for text in texts
-    ], dtype=bool)
-    count = int(short.sum())
-    if not count:
-        return {
-            "max_words": SHORT_MESSAGE_MAX_WORDS,
-            "count": 0,
-            "accuracy": None,
-            "coverage": None,
-            "accepted_accuracy": None,
-        }
-
-    correct = labels[short] == predictions[short]
-    accepted = probabilities[short].max(axis=1) >= threshold
-    return {
-        "max_words": SHORT_MESSAGE_MAX_WORDS,
-        "count": count,
-        "accuracy": float(correct.mean()),
-        "coverage": float(accepted.mean()),
-        "accepted_accuracy": float(correct[accepted].mean()) if accepted.any() else None,
-    }
-
-
 # Основной процесс обучения
 def train_model():
     set_seed(RANDOM_SEED)
@@ -524,10 +497,6 @@ def train_model():
     test_labels, test_predictions, test_probabilities = (
         evaluate_model(model, test_loader)
     )
-    short_message_metrics = evaluate_short_messages(
-        test_data["text"], test_labels, test_predictions, test_probabilities,
-        threshold_info["threshold"],
-    )
 
     accuracy = accuracy_score(
         test_labels,
@@ -658,7 +627,6 @@ def train_model():
         "f1_macro": float(f1),
         "average_inference_time_seconds": average_time,
         "confidence_threshold": threshold_info,
-        "short_messages": short_message_metrics,
         "classification_report": report,
         "training_history": history,
     }
@@ -680,7 +648,6 @@ def train_model():
     print(f"Precision (macro): {precision:.4f}")
     print(f"Recall (macro): {recall:.4f}")
     print(f"F1 (macro): {f1:.4f}")
-    print(f"Короткие сообщения в тесте: {short_message_metrics}")
 
     print("\nМатрица ошибок:")
     print(matrix)

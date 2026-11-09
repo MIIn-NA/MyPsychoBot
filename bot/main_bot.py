@@ -49,6 +49,10 @@ solver = (
 # Запись, личная статистика и StatisticsService используют одну базу.
 storage = Storage()
 stats_service = StatisticsService(storage)
+DEFAULT_GROUP_ID = 1
+GROUP_REPORT_DAYS = 30
+STATISTICS_BUTTON = "Статистика 📊"
+STATISTICS_BUTTON_TEXTS = {STATISTICS_BUTTON, "Моя статистика 📊"}
 
 user_states = {}
 
@@ -58,7 +62,7 @@ def get_main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(text="Упражнения 🧘‍♀️"), types.KeyboardButton(text="Интересный факт 💡")],
-            [types.KeyboardButton(text="Помощь ❓"), types.KeyboardButton(text="Моя статистика 📊")]
+            [types.KeyboardButton(text="Помощь ❓"), types.KeyboardButton(text=STATISTICS_BUTTON)]
         ],
         resize_keyboard=True
     )
@@ -142,7 +146,6 @@ async def cmd_fact(message: types.Message):
     await message.answer(random.choice(facts), reply_markup=get_main_keyboard())
 
 @dp.message(Command("stats"))
-@dp.message(F.text == "Моя статистика 📊")
 async def cmd_my_stats(message: types.Message):
     user_id = message.from_user.id
     try:
@@ -160,16 +163,42 @@ async def cmd_my_stats(message: types.Message):
     norm = counts.get(0, 0)
     stress = counts.get(1, 0)
     anxiety = counts.get(2, 0)
-    
     text = (
-        "📊 **Твоя личная статистика**\n\n"
-        f"Всего проанализировано сообщений: **{total}**\n\n"
+        "📊 Твоя личная статистика\n\n"
+        f"Сохранено анализов: {total}\n\n"
         f"🟢 Норма: {norm} ({int(norm/total*100)}%)\n"
         f"🟡 Стресс: {stress} ({int(stress/total*100)}%)\n"
-        f"🔴 Тревога: {anxiety} ({int(anxiety/total*100)}%)\n\n"
-        "💡 *Ты можешь показать эту статистику психологу.*"
+        f"🔴 Тревога: {anxiety} ({int(anxiety/total*100)}%)"
     )
-    await message.answer(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer(text, reply_markup=get_main_keyboard())
+
+
+@dp.message(F.text.in_(STATISTICS_BUTTON_TEXTS))
+async def show_statistics(message: types.Message):
+    if message.chat.type != "private":
+        await message.answer("Откройте личный чат с ботом, чтобы посмотреть статистику.")
+        return
+
+    await cmd_my_stats(message)
+    today = datetime.date.today()
+    start_date = today - datetime.timedelta(days=GROUP_REPORT_DAYS - 1)
+    try:
+        report = await stats_service.get_report(
+            DEFAULT_GROUP_ID, start_date.isoformat(), today.isoformat(),
+        )
+    except Exception as error:
+        logging.error("Ошибка формирования общей статистики (%s).", type(error).__name__)
+        await message.answer("Не удалось сформировать общую статистику. Попробуйте позже.")
+        return
+
+    if report.chart_png is None:
+        await message.answer(report.summary)
+        return
+
+    await message.answer_photo(
+        photo=types.BufferedInputFile(report.chart_png, filename="group_statistics.png"),
+        caption=report.summary,
+    )
 
 
 # --- ОБРАБОТКА КНОПОК КОНТЕКСТА ---
@@ -201,7 +230,7 @@ async def handle_context_button(message: types.Message):
 
 # --- ОСНОВНАЯ ЛОГИКА ДИАЛОГА ---
 
-@dp.message(~Command(commands=["start", "help", "exercise", "fact", "stats"]), F.text, ~F.text.in_({"Упражнения 🧘‍♀️", "Интересный факт 💡", "Помощь ❓", "Моя статистика 📊"}))
+@dp.message(~Command(commands=["start", "help", "exercise", "fact", "stats"]), F.text, ~F.text.in_({"Упражнения 🧘‍♀️", "Интересный факт 💡", "Помощь ❓"} | STATISTICS_BUTTON_TEXTS))
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
     text = message.text
@@ -214,6 +243,21 @@ async def handle_message(message: types.Message):
         await message.answer(
             "Сообщение пустое. Напишите, что происходит и как вы себя чувствуете.",
             reply_markup=get_context_keyboard() if state.get("awaiting_clarification") else get_main_keyboard(),
+        )
+        return
+
+    # Для общего описания сначала просим контекст, чтобы не делать вывод по одной фразе.
+    normalized = " ".join(text.casefold().replace("ё", "е").split()).strip(" .,!?:…")
+    if not state.get("awaiting_clarification") and normalized in {
+        "плохо", "все плохо", "мне плохо", "очень плохо", "мне очень плохо",
+        "все очень плохо", "тяжело", "мне тяжело",
+    }:
+        state.update(previous_text=text, clarification_count=0,
+                     awaiting_clarification=True, awaiting_feedback=False)
+        await message.answer(
+            "Похоже, тебе сейчас нелегко. Чтобы я мог дать более подходящий совет, "
+            "выбери, что сейчас больше всего давит, или расскажи чуть подробнее.",
+            reply_markup=get_context_keyboard(),
         )
         return
 
@@ -293,7 +337,7 @@ async def process_solver(message: types.Message, text: str, state: dict):
         today = datetime.date.today().isoformat()
         # Ограничение: до подключения учебных групп все записи относятся к группе 1.
         await storage.save_result(
-            user_id=message.from_user.id, group=1, analysis_date=today,
+            user_id=message.from_user.id, group=DEFAULT_GROUP_ID, analysis_date=today,
             predicted_class=result.predicted_class, model_confidence=result.confidence, advice=result.advice
         )
     except StorageError as error:

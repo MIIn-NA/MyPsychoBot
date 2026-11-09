@@ -1,5 +1,6 @@
 """Проверки настоящей SQLite во временных каталогах, без Telegram и модели."""
 import ast
+import datetime
 import hashlib
 import importlib.util
 import os
@@ -283,10 +284,11 @@ class StorageIntegrationTests(unittest.IsolatedAsyncioTestCase):
         tree = ast.parse(Path('bot/main_bot.py').read_text())
         nodes = []
         for node in tree.body:
-            if isinstance(node, ast.AsyncFunctionDef) and node.name in ('cmd_my_stats', 'main'):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name in ('cmd_my_stats', 'show_statistics', 'main'):
                 node.decorator_list = []
                 nodes.append(node)
-        namespace = dict(types=SimpleNamespace(Message=object), logging=Mock(),
+        namespace = dict(types=SimpleNamespace(Message=object, BufferedInputFile=Mock()), logging=Mock(),
+                         DEFAULT_GROUP_ID=1, GROUP_REPORT_DAYS=30, datetime=datetime,
                          StorageInitializationError=StorageInitializationError,
                          get_main_keyboard=lambda: 'main',
                          dp=SimpleNamespace(start_polling=AsyncMock()), bot=object())
@@ -328,6 +330,86 @@ class StorageIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 message = SimpleNamespace(from_user=SimpleNamespace(id=user_id), answer=AsyncMock())
                 await namespace['cmd_my_stats'](message)
                 self.assertIn(expected, message.answer.call_args.args[0])
+
+    async def test_statistics_button_sends_personal_totals_and_group_chart(self):
+        from io import BytesIO
+        from PIL import Image
+        from bot.statistics_service import StatisticsService
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / 'results.db')
+            await storage.init_table()
+            for user_id, group, day, label in (
+                (10, 1, '2026-10-10', 0),  # Граница периода включена.
+                (10, 1, '2026-10-09', 2),  # Только в личной статистике за всё время.
+                (20, 1, '2026-11-08', 1),  # Только в групповой статистике.
+                (30, 2, '2026-11-08', 2),  # Другая группа.
+            ):
+                await storage.save_result(user_id, group, day, label, .85, 'Личный совет')
+            namespace = self.handlers()
+            namespace['storage'] = storage
+            namespace['stats_service'] = StatisticsService(storage)
+            namespace['datetime'] = SimpleNamespace(
+                date=SimpleNamespace(today=lambda: datetime.date(2026, 11, 8)),
+                timedelta=datetime.timedelta,
+            )
+            message = SimpleNamespace(chat=SimpleNamespace(type='private'),
+                                      from_user=SimpleNamespace(id=10),
+                                      answer=AsyncMock(), answer_photo=AsyncMock())
+            await namespace['show_statistics'](message)
+
+            message.answer.assert_awaited_once()
+            personal = message.answer.call_args.args[0]
+            self.assertIn('Норма: 1 (50%)', personal)
+            self.assertIn('Тревога: 1 (50%)', personal)
+            self.assertIn('Стресс: 0 (0%)', personal)
+            message.answer_photo.assert_awaited_once()
+            summary = message.answer_photo.call_args.kwargs['caption']
+            self.assertIn('2026-10-10 — 2026-11-08', summary)
+            self.assertIn('Число анализов: 2', summary)
+            self.assertIn('Стресс: 1 (50.0%)', summary)
+            self.assertIn('Тревога: 0 (0.0%)', summary)
+            self.assertNotIn('Личный совет', summary)
+            photo = namespace['types'].BufferedInputFile
+            self.assertIs(message.answer_photo.call_args.kwargs['photo'], photo.return_value)
+            with Image.open(BytesIO(photo.call_args.args[0])) as chart:
+                self.assertEqual(chart.format, 'PNG')
+                chart.verify()
+
+    async def test_statistics_button_keeps_empty_group_and_report_failure_distinct(self):
+        from bot.statistics_service import StatisticsService
+
+        namespace = self.handlers()
+        storage = SimpleNamespace(
+            get_user_class_counts=AsyncMock(return_value={0: 1}),
+            get_results=AsyncMock(return_value=[]),
+        )
+        namespace.update(storage=storage, stats_service=StatisticsService(storage))
+        message = SimpleNamespace(chat=SimpleNamespace(type='private'),
+                                  from_user=SimpleNamespace(id=10),
+                                  answer=AsyncMock(), answer_photo=AsyncMock())
+        await namespace['show_statistics'](message)
+        self.assertIn('Сохранено анализов: 1', message.answer.call_args_list[0].args[0])
+        self.assertIn('За выбранный период данных нет', message.answer.call_args.args[0])
+        message.answer_photo.assert_not_awaited()
+
+        message.answer.reset_mock()
+        storage.get_results.side_effect = sqlite3.OperationalError('PRIVATE_READ_DETAILS')
+        await namespace['show_statistics'](message)
+        self.assertIn('Сохранено анализов: 1', message.answer.call_args_list[0].args[0])
+        self.assertIn('Не удалось сформировать общую статистику', message.answer.call_args.args[0])
+        self.assertNotIn('PRIVATE_READ_DETAILS', str(namespace['logging'].error.call_args))
+        message.answer_photo.assert_not_awaited()
+
+    async def test_statistics_button_keeps_reports_in_private_chat(self):
+        namespace = self.handlers()
+        namespace['storage'] = SimpleNamespace(get_user_class_counts=AsyncMock())
+        namespace['stats_service'] = SimpleNamespace(get_report=AsyncMock())
+        message = SimpleNamespace(chat=SimpleNamespace(type='group'), answer=AsyncMock())
+        await namespace['show_statistics'](message)
+        self.assertIn('личный чат', message.answer.call_args.args[0])
+        namespace['storage'].get_user_class_counts.assert_not_awaited()
+        namespace['stats_service'].get_report.assert_not_awaited()
 
     async def test_real_sqlite_write_failure_still_delivers_solver_result(self):
         from test_dialogue import handlers

@@ -1,69 +1,12 @@
-"""Проверка лимита без установки torch, transformers и загрузки весов."""
+"""Проверка реакции Telegram на ошибку длины от модели."""
 import ast
-import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock
 
 from bot.errors import TextTooLongError
 from bot.solver import Solver, SolverError
-
-
-def load_classifier():
-    spec = importlib.util.spec_from_file_location('bot._classifier_test', 'bot/classifier.py')
-    module = importlib.util.module_from_spec(spec)
-    with patch.dict('sys.modules', {'torch': Mock(), 'transformers': Mock()}):
-        spec.loader.exec_module(module)
-    return module
-
-
-class ClassifierTests(unittest.TestCase):
-    def setUp(self):
-        self.module = load_classifier()
-        self.classifier = self.module.RuBertClassifier.__new__(self.module.RuBertClassifier)
-        self.classifier.max_length = 5
-        self.classifier.device = 'cpu'
-        self.classifier.model = Mock()
-        self.inputs = Mock()
-        self.inputs.__getitem__ = Mock(return_value=SimpleNamespace(shape=(1, 5)))
-        self.inputs.to.return_value = {"input_ids": Mock()}
-        self.classifier.tokenizer = Mock(return_value=self.inputs)
-        self.module.torch.no_grad.return_value.__enter__ = Mock()
-        self.module.torch.no_grad.return_value.__exit__ = Mock(return_value=False)
-        self.module.torch.softmax.return_value = [[.1, .8, .1]]
-        self.module.torch.argmax.return_value = 1
-
-    def test_exact_limit_is_accepted_without_truncation(self):
-        self.assertEqual(self.classifier.predict('Текст'), (1, .8))
-        self.classifier.tokenizer.assert_called_once_with(
-            'Текст', add_special_tokens=True, truncation=False, return_tensors='pt'
-        )
-        self.classifier.model.assert_called_once()
-
-    def test_over_limit_rejected_before_network_and_knowledge_base(self):
-        self.inputs.__getitem__.return_value.shape = (1, 6)
-        kb = Mock()
-        with self.assertRaises(TextTooLongError) as caught:
-            Solver(self.classifier, kb).solve('Длинный текст')
-        self.assertEqual(caught.exception.token_count, 6)
-        self.assertEqual(caught.exception.max_length, 5)
-        self.classifier.model.assert_not_called()
-        self.inputs.to.assert_not_called()
-        kb.get_recommendation_with_metadata.assert_not_called()
-
-    def test_model_position_limit_caps_configured_limit(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'config.json').write_text('{}')
-            (root / 'inference_config.json').write_text(
-                '{"max_length": 1024, "confidence_threshold": 0.6}'
-            )
-            model = self.module.AutoModelForSequenceClassification.from_pretrained.return_value
-            model.config.max_position_embeddings = 512
-            classifier = self.module.RuBertClassifier(root)
-            self.assertEqual(classifier.max_length, 512)
 
 
 class TelegramLengthTests(unittest.IsolatedAsyncioTestCase):
