@@ -1,9 +1,4 @@
-
-"""
-Ответственная: Даша.
-Назначение: подготовка данных, обучение и оценка модели RuBERT.
-"""
-
+import argparse
 import json
 import random
 import re
@@ -25,14 +20,12 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-
 # Пути проекта
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 DATA_PATH = PROJECT_DIR / "data" / "data.csv"
 MODEL_DIR = PROJECT_DIR / "models" / "rubert_classifier"
 RESULTS_DIR = PROJECT_DIR / "results"
-
 
 # Параметры модели
 MODEL_NAME = "DeepPavlov/rubert-base-cased"
@@ -56,13 +49,19 @@ LABEL_TO_ID = {
 }
 
 RANDOM_SEED = 42
-MAX_LENGTH = 64
-BATCH_SIZE = 8
-EPOCHS = 3
+MAX_LENGTH = 128
+BATCH_SIZE = 16
+EPOCHS = 5
 LEARNING_RATE = 2e-5
+WEIGHT_DECAY = 0.01
+
+MIN_EXAMPLES_PER_CLASS = 10  # иначе стратифицированное разбиение ненадёжно
 
 TARGET_ACCURACY = 0.80
-MIN_THRESHOLD = 0.6  # Минимальный порог уверенности
+MIN_THRESHOLD = 0.60  # минимальный порог уверенности
+MAX_THRESHOLD = 0.95
+MIN_COVERAGE = 0.50  # модель должна принимать не менее 50% сообщений
+MIN_ACCEPTED = 10  # и не менее 10 примеров, иначе оценка случайна
 
 DEVICE = torch.device(
     "cuda" if torch.cuda.is_available() else "cpu"
@@ -79,7 +78,7 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-# Нормализация текста
+# Нормализация текста (должна совпадать с classifier.py)
 def clean_text(text):
     text = str(text)
     text = re.sub(r"\s+", " ", text)
@@ -87,13 +86,13 @@ def clean_text(text):
 
 
 # Загрузка и проверка датасета
-def load_data():
-    if not DATA_PATH.exists():
+def load_data(data_path=DATA_PATH):
+    if not data_path.exists():
         raise FileNotFoundError(
-            f"Файл датасета не найден: {DATA_PATH}"
+            f"Файл датасета не найден: {data_path}"
         )
 
-    data = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
+    data = pd.read_csv(data_path, encoding="utf-8-sig")
 
     required_columns = {"text", "label"}
 
@@ -104,21 +103,20 @@ def load_data():
 
     data = data[["text", "label"]].copy()
 
-    data["text"] = data["text"].apply(clean_text)
-    data["label"] = pd.to_numeric(
-        data["label"], errors="coerce"
-    )
-
+    # Сначала убираем пустые значения, и только потом чистим текст,
+    # иначе NaN превращается в строку "nan".
+    data["label"] = pd.to_numeric(data["label"], errors="coerce")
     data = data.dropna(subset=["text", "label"])
 
+    data["text"] = data["text"].apply(clean_text)
+    data = data[data["text"] != ""]
+
     if not data["label"].apply(
-        lambda value: float(value).is_integer()
+            lambda value: float(value).is_integer()
     ).all():
         raise ValueError("Метки классов должны быть целыми числами.")
 
     data["label"] = data["label"].astype(int)
-
-    data = data[data["text"] != ""]
 
     if not data["label"].isin(CLASS_NAMES.keys()).all():
         raise ValueError(
@@ -126,31 +124,33 @@ def load_data():
         )
 
     # Проверяем, нет ли одинаковых текстов с разными метками
-    normalized = data["text"].str.casefold()
+    data["normalized"] = data["text"].str.casefold()
 
-    conflicting = (
-        data.assign(normalized=normalized)
-        .groupby("normalized")["label"]
-        .nunique()
-    )
+    conflicting = data.groupby("normalized")["label"].nunique()
 
     if (conflicting > 1).any():
+        examples = conflicting[conflicting > 1].index[:5].tolist()
         raise ValueError(
             "Обнаружены одинаковые тексты с разными метками. "
-            "Исправьте разметку датасета."
+            f"Исправьте разметку датасета. Примеры: {examples}"
         )
 
     # Удаляем точные дубликаты без учета регистра
-    data["normalized"] = normalized
+    before = len(data)
     data = data.drop_duplicates(subset=["normalized"])
     data = data.drop(columns=["normalized"])
+    removed = before - len(data)
+
+    if removed:
+        print(f"Удалено дубликатов: {removed}")
 
     counts = data["label"].value_counts()
 
     for class_id in CLASS_NAMES:
-        if counts.get(class_id, 0) < 3:
+        if counts.get(class_id, 0) < MIN_EXAMPLES_PER_CLASS:
             raise ValueError(
-                f"Для класса {class_id} недостаточно примеров."
+                f"Для класса {class_id} недостаточно примеров "
+                f"(нужно минимум {MIN_EXAMPLES_PER_CLASS})."
             )
 
     print("\nРаспределение классов:")
@@ -160,7 +160,30 @@ def load_data():
 
     print(f"\nВсего примеров: {len(data)}")
 
-    return data
+    return data.reset_index(drop=True)
+
+
+# Проверка, не обрезаются ли тексты при заданном MAX_LENGTH
+def report_token_lengths(data, tokenizer, max_length):
+    encoded = tokenizer(data["text"].tolist(), truncation=False)
+    lengths = np.array([len(ids) for ids in encoded["input_ids"]])
+
+    too_long = float((lengths > max_length).mean())
+
+    print("\nДлина текстов в токенах (с учётом специальных):")
+    print(f"медиана: {int(np.median(lengths))}")
+    print(f"95-й процентиль: {int(np.percentile(lengths, 95))}")
+    print(f"максимум: {int(lengths.max())}")
+    print(
+        f"Длиннее MAX_LENGTH={max_length}: {too_long:.1%} "
+        "(такие примеры будут обрезаны при обучении)"
+    )
+
+    if too_long > 0.05:
+        print(
+            "Предупреждение: больше 5% примеров обрезается. "
+            "Увеличьте --max-length."
+        )
 
 
 # Разделение данных на три выборки
@@ -184,53 +207,73 @@ def split_data(data):
     print(f"Валидационная: {len(validation_data)}")
     print(f"Тестовая: {len(test_data)}")
 
-    return train_data, validation_data, test_data
+    return (
+        train_data.reset_index(drop=True),
+        validation_data.reset_index(drop=True),
+        test_data.reset_index(drop=True),
+    )
 
 
-# Подготовка данных для RuBERT
+# Подготовка данных для RuBERT (padding выполняется по батчу)
 class TextDataset(Dataset):
 
-    def __init__(self, texts, labels, tokenizer):
+    def __init__(self, texts, labels, tokenizer, max_length):
         self.encodings = tokenizer(
             texts,
             truncation=True,
-            padding="max_length",
-            max_length=MAX_LENGTH,
-            return_tensors="pt",
+            max_length=max_length,
         )
-
-        self.labels = torch.tensor(
-            labels,
-            dtype=torch.long,
-        )
+        self.labels = list(labels)
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, index):
         item = {
-            key: value[index]
-            for key, value in self.encodings.items()
+            key: values[index]
+            for key, values in self.encodings.items()
         }
-
         item["labels"] = self.labels[index]
-
         return item
 
 
+def make_collate_fn(tokenizer):
+    def collate(batch):
+        labels = torch.tensor(
+            [item.pop("labels") for item in batch],
+            dtype=torch.long,
+        )
+        padded = dict(
+            tokenizer.pad(batch, padding=True, return_tensors="pt")
+        )
+        padded["labels"] = labels
+        return padded
+
+    return collate
+
+
 # Создание DataLoader
-def create_loader(data, tokenizer, shuffle=False):
+def create_loader(data, tokenizer, max_length, shuffle=False):
     dataset = TextDataset(
         data["text"].tolist(),
         data["label"].tolist(),
         tokenizer,
+        max_length,
     )
+
+    generator = None
+
+    if shuffle:
+        generator = torch.Generator()
+        generator.manual_seed(RANDOM_SEED)
 
     return DataLoader(
         dataset,
         batch_size=BATCH_SIZE,
         shuffle=shuffle,
         num_workers=0,
+        collate_fn=make_collate_fn(tokenizer),
+        generator=generator,
     )
 
 
@@ -253,27 +296,12 @@ def evaluate_model(model, loader):
 
             outputs = model(**batch)
 
-            probabilities = torch.softmax(
-                outputs.logits,
-                dim=1,
-            )
+            probabilities = torch.softmax(outputs.logits, dim=1)
+            predictions = torch.argmax(probabilities, dim=1)
 
-            predictions = torch.argmax(
-                probabilities,
-                dim=1,
-            )
-
-            all_predictions.extend(
-                predictions.cpu().numpy()
-            )
-
-            all_labels.extend(
-                labels.cpu().numpy()
-            )
-
-            all_probabilities.extend(
-                probabilities.cpu().numpy()
-            )
+            all_predictions.extend(predictions.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            all_probabilities.extend(probabilities.cpu().numpy())
 
     return (
         np.array(all_labels),
@@ -282,87 +310,102 @@ def evaluate_model(model, loader):
     )
 
 
+# Точность и покрытие при заданном пороге
+def accuracy_at_threshold(labels, predictions, probabilities, threshold):
+    confidences = probabilities.max(axis=1)
+    accepted = confidences >= threshold
+
+    coverage = float(accepted.mean())
+
+    if not accepted.any():
+        return None, coverage
+
+    accuracy = float(
+        accuracy_score(labels[accepted], predictions[accepted])
+    )
+
+    return accuracy, coverage
+
+
 # Подбор порога уверенности по валидационной выборке
 def find_confidence_threshold(labels, predictions, probabilities):
     confidences = probabilities.max(axis=1)
 
-    best_threshold = None
-    best_coverage = -1.0
-    best_accuracy = 0.0
-
-    # Рассматриваем пороги не ниже MIN_THRESHOLD
-    candidates = np.unique(
-        np.append(
-            confidences[confidences >= MIN_THRESHOLD],
-            MIN_THRESHOLD,
-        )
+    candidates = np.round(
+        np.arange(MIN_THRESHOLD, MAX_THRESHOLD + 0.0001, 0.01), 2
     )
+
+    feasible = []
 
     for threshold in candidates:
         accepted = confidences >= threshold
 
-        coverage = accepted.mean()
-
-        # Требуем, чтобы модель принимала не менее 50% сообщений
-        if coverage < 0.50:
-            continue
-
-        accuracy = accuracy_score(
-            labels[accepted],
-            predictions[accepted],
-        )
-
-        # Выбираем порог с максимальным покрытием,
-        # при котором достигнута целевая Accuracy
-        if accuracy >= TARGET_ACCURACY:
-            if coverage > best_coverage:
-                best_threshold = float(threshold)
-                best_coverage = float(coverage)
-                best_accuracy = float(accuracy)
-
-    # Если целевая Accuracy не достигнута
-    if best_threshold is None:
-        best_threshold = MIN_THRESHOLD
-
-        accepted = confidences >= best_threshold
         coverage = float(accepted.mean())
 
-        if accepted.any():
-            best_accuracy = float(
-                accuracy_score(
-                    labels[accepted],
-                    predictions[accepted],
-                )
-            )
-        else:
-            best_accuracy = None
+        if coverage < MIN_COVERAGE or accepted.sum() < MIN_ACCEPTED:
+            continue
 
-        print(
-            "\nПредупреждение: не удалось достичь "
-            f"Accuracy {TARGET_ACCURACY:.0%} "
-            "при покрытии не менее 50%. "
-            f"Используется минимальный порог {MIN_THRESHOLD:.2f}."
+        accuracy = float(
+            accuracy_score(labels[accepted], predictions[accepted])
+        )
+
+        feasible.append((float(threshold), accuracy, coverage))
+
+    # Среди порогов с достигнутой целевой Accuracy берём тот,
+    # у которого покрытие максимально.
+    reached = [item for item in feasible if item[1] >= TARGET_ACCURACY]
+
+    if reached:
+        threshold, accuracy, coverage = max(
+            reached, key=lambda item: (item[2], -item[0])
         )
 
         return {
-            "threshold": best_threshold,
+            "threshold": threshold,
             "target_accuracy": TARGET_ACCURACY,
-            "achieved_accuracy": best_accuracy,
+            "achieved_accuracy": accuracy,
             "coverage": coverage,
-            "target_reached": False,
+            "target_reached": True,
         }
 
+    print(
+        "\nПредупреждение: не удалось достичь "
+        f"Accuracy {TARGET_ACCURACY:.0%} "
+        f"при покрытии не менее {MIN_COVERAGE:.0%}."
+    )
+
+    if feasible:
+        # Берём порог с лучшей Accuracy (при равенстве — меньший порог).
+        threshold, accuracy, coverage = max(
+            feasible, key=lambda item: (item[1], -item[0])
+        )
+        print(f"Выбран порог {threshold:.2f} с лучшей Accuracy.")
+    else:
+        threshold = MIN_THRESHOLD
+        accuracy, coverage = accuracy_at_threshold(
+            labels, predictions, probabilities, threshold
+        )
+        print(f"Используется минимальный порог {MIN_THRESHOLD:.2f}.")
+
     return {
-        "threshold": best_threshold,
+        "threshold": threshold,
         "target_accuracy": TARGET_ACCURACY,
-        "achieved_accuracy": best_accuracy,
-        "coverage": best_coverage,
-        "target_reached": True,
+        "achieved_accuracy": accuracy,
+        "coverage": coverage,
+        "target_reached": False,
     }
 
 
+# Веса классов: редкие классы получают больший вес
+def compute_class_weights(labels):
+    counts = np.bincount(labels, minlength=len(CLASS_NAMES)).astype(float)
+    weights = counts.sum() / (len(CLASS_NAMES) * counts)
+
+    return torch.tensor(weights, dtype=torch.float)
+
+
 # Основной процесс обучения
-def train_model():
+def train_model(epochs=EPOCHS, max_length=MAX_LENGTH, data_path=DATA_PATH):
     set_seed(RANDOM_SEED)
 
     print(f"Устройство: {DEVICE}")
@@ -370,7 +413,7 @@ def train_model():
     if torch.cuda.is_available():
         print(f"Видеокарта: {torch.cuda.get_device_name(0)}")
 
-    data = load_data()
+    data = load_data(data_path)
 
     train_data, validation_data, test_data = split_data(data)
 
@@ -378,11 +421,13 @@ def train_model():
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-    print("Загрузка RuBERT...")
+    report_token_lengths(data, tokenizer, max_length)
+
+    print("\nЗагрузка RuBERT...")
 
     model = AutoModelForSequenceClassification.from_pretrained(
         MODEL_NAME,
-        num_labels=3,
+        num_labels=len(CLASS_NAMES),
         id2label=ID_TO_LABEL,
         label2id=LABEL_TO_ID,
     )
@@ -390,23 +435,31 @@ def train_model():
     model.to(DEVICE)
 
     train_loader = create_loader(
-        train_data, tokenizer, shuffle=True
+        train_data, tokenizer, max_length, shuffle=True
     )
 
     validation_loader = create_loader(
-        validation_data, tokenizer
+        validation_data, tokenizer, max_length
     )
 
     test_loader = create_loader(
-        test_data, tokenizer
+        test_data, tokenizer, max_length
+    )
+
+    class_weights = compute_class_weights(train_data["label"].to_numpy())
+    print(f"\nВеса классов: {class_weights.tolist()}")
+
+    loss_function = torch.nn.CrossEntropyLoss(
+        weight=class_weights.to(DEVICE)
     )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
     )
 
-    total_steps = len(train_loader) * EPOCHS
+    total_steps = len(train_loader) * epochs
     warmup_steps = int(total_steps * 0.10)
 
     def lr_lambda(current_step):
@@ -425,17 +478,18 @@ def train_model():
     )
 
     best_f1 = -1.0
+    best_epoch = 0
     best_state = None
 
     history = []
 
     # Цикл обучения
-    for epoch in range(EPOCHS):
+    for epoch in range(epochs):
         model.train()
 
         total_loss = 0.0
 
-        print(f"\nЭпоха {epoch + 1}/{EPOCHS}")
+        print(f"\nЭпоха {epoch + 1}/{epochs}")
 
         for batch in train_loader:
             batch = {
@@ -443,11 +497,13 @@ def train_model():
                 for key, value in batch.items()
             }
 
+            labels = batch.pop("labels")
+
             optimizer.zero_grad()
 
             outputs = model(**batch)
 
-            loss = outputs.loss
+            loss = loss_function(outputs.logits, labels)
 
             loss.backward()
 
@@ -477,16 +533,16 @@ def train_model():
             )
         )
 
+        validation_accuracy = accuracy_score(labels, predictions)
+
         print(f"Training loss: {average_loss:.4f}")
-        print(
-            f"Validation accuracy: "
-            f"{accuracy_score(labels, predictions):.4f}"
-        )
+        print(f"Validation accuracy: {validation_accuracy:.4f}")
         print(f"Validation F1: {f1:.4f}")
 
         history.append({
             "epoch": epoch + 1,
-            "training_loss": average_loss,
+            "training_loss": float(average_loss),
+            "validation_accuracy": float(validation_accuracy),
             "validation_precision": float(precision),
             "validation_recall": float(recall),
             "validation_f1": float(f1),
@@ -494,6 +550,7 @@ def train_model():
 
         if f1 > best_f1:
             best_f1 = f1
+            best_epoch = epoch + 1
 
             best_state = {
                 key: value.detach().cpu().clone()
@@ -502,6 +559,8 @@ def train_model():
 
     if best_state is None:
         raise RuntimeError("Не удалось сохранить лучшую модель.")
+
+    print(f"\nЛучшая эпоха: {best_epoch} (F1 на валидации {best_f1:.4f})")
 
     model.load_state_dict(best_state)
     model.to(DEVICE)
@@ -525,10 +584,7 @@ def train_model():
         evaluate_model(model, test_loader)
     )
 
-    accuracy = accuracy_score(
-        test_labels,
-        test_predictions,
-    )
+    accuracy = accuracy_score(test_labels, test_predictions)
 
     precision, recall, f1, _ = (
         precision_recall_fscore_support(
@@ -558,33 +614,55 @@ def train_model():
         zero_division=0,
     )
 
+    # Как поведёт себя выбранный порог на данных, которых модель не видела
+    test_threshold_accuracy, test_threshold_coverage = accuracy_at_threshold(
+        test_labels,
+        test_predictions,
+        test_probabilities,
+        threshold_info["threshold"],
+    )
+
     # Измерение времени обработки одного сообщения
+    # (так же, как в classifier.py: по одному, без padding)
     model.eval()
 
-    timing_texts = test_data["text"].tolist()
+    timing_texts = test_data["text"].tolist()[:100]
 
-    if DEVICE.type == "cuda":
-        torch.cuda.synchronize()
-
-    start_time = time.perf_counter()
-
-    with torch.no_grad():
-        for text in timing_texts:
-            inputs = tokenizer(
-                clean_text(text),
+    if timing_texts:
+        with torch.no_grad():
+            # Прогрев, чтобы первый вызов не искажал среднее
+            warmup = tokenizer(
+                timing_texts[0],
                 truncation=True,
-                max_length=MAX_LENGTH,
+                max_length=max_length,
                 return_tensors="pt",
             ).to(DEVICE)
+            model(**warmup)
 
-            model(**inputs)
+        if DEVICE.type == "cuda":
+            torch.cuda.synchronize()
 
-    if DEVICE.type == "cuda":
-        torch.cuda.synchronize()
+        start_time = time.perf_counter()
 
-    total_time = time.perf_counter() - start_time
+        with torch.no_grad():
+            for text in timing_texts:
+                inputs = tokenizer(
+                    clean_text(text),
+                    truncation=True,
+                    max_length=max_length,
+                    return_tensors="pt",
+                ).to(DEVICE)
 
-    average_time = total_time / len(timing_texts)
+                model(**inputs)
+
+        if DEVICE.type == "cuda":
+            torch.cuda.synchronize()
+
+        average_time = (
+                               time.perf_counter() - start_time
+                       ) / len(timing_texts)
+    else:
+        average_time = 0.0
 
     # Сохранение модели и токенизатора
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -600,9 +678,9 @@ def train_model():
     }
 
     with open(
-        MODEL_DIR / "class_mapping.json",
-        "w",
-        encoding="utf-8",
+            MODEL_DIR / "class_mapping.json",
+            "w",
+            encoding="utf-8",
     ) as file:
         json.dump(
             class_mapping,
@@ -613,14 +691,15 @@ def train_model():
 
     # Настройки для classifier.py
     inference_config = {
-        "max_length": MAX_LENGTH,
+        "max_length": max_length,
         "confidence_threshold": threshold_info["threshold"],
+        "target_reached": threshold_info["target_reached"],
     }
 
     with open(
-        MODEL_DIR / "inference_config.json",
-        "w",
-        encoding="utf-8",
+            MODEL_DIR / "inference_config.json",
+            "w",
+            encoding="utf-8",
     ) as file:
         json.dump(inference_config, file, indent=4)
 
@@ -636,6 +715,29 @@ def train_model():
         encoding="utf-8-sig",
     )
 
+    # Предсказания на тесте: помогают разобрать, где модель ошибается
+    predictions_frame = pd.DataFrame({
+        "text": test_data["text"].tolist(),
+        "true_label": [CLASS_NAMES[int(v)] for v in test_labels],
+        "predicted_label": [CLASS_NAMES[int(v)] for v in test_predictions],
+        "confidence": test_probabilities.max(axis=1).round(4),
+    })
+
+    predictions_frame.to_csv(
+        RESULTS_DIR / "test_predictions.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    predictions_frame[
+        predictions_frame["true_label"]
+        != predictions_frame["predicted_label"]
+        ].sort_values("confidence", ascending=False).to_csv(
+        RESULTS_DIR / "misclassified_test.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
     # Сохранение результатов
     results = {
         "model_name": MODEL_NAME,
@@ -644,24 +746,28 @@ def train_model():
         "train_size": len(train_data),
         "validation_size": len(validation_data),
         "test_size": len(test_data),
-        "epochs": EPOCHS,
+        "epochs": epochs,
+        "best_epoch": best_epoch,
         "batch_size": BATCH_SIZE,
         "learning_rate": LEARNING_RATE,
-        "max_length": MAX_LENGTH,
+        "max_length": max_length,
+        "class_weights": class_weights.tolist(),
         "accuracy": float(accuracy),
         "precision_macro": float(precision),
         "recall_macro": float(recall),
         "f1_macro": float(f1),
-        "average_inference_time_seconds": average_time,
+        "average_inference_time_seconds": float(average_time),
         "confidence_threshold": threshold_info,
+        "test_accuracy_at_threshold": test_threshold_accuracy,
+        "test_coverage_at_threshold": test_threshold_coverage,
         "classification_report": report,
         "training_history": history,
     }
 
     with open(
-        RESULTS_DIR / "training_results.json",
-        "w",
-        encoding="utf-8",
+            RESULTS_DIR / "training_results.json",
+            "w",
+            encoding="utf-8",
     ) as file:
         json.dump(
             results,
@@ -676,8 +782,8 @@ def train_model():
     print(f"Recall (macro): {recall:.4f}")
     print(f"F1 (macro): {f1:.4f}")
 
-    print("\nМатрица ошибок:")
-    print(matrix)
+    print("\nМатрица ошибок (строки — истина, столбцы — прогноз):")
+    print(matrix_frame)
 
     print(
         f"\nСреднее время обработки сообщения: "
@@ -685,28 +791,45 @@ def train_model():
     )
 
     print(
-        f"\nПорог уверенности: "
-        f"{threshold_info['threshold']:.4f}"
+        f"\nПорог уверенности (подобран на валидации): "
+        f"{threshold_info['threshold']:.2f}"
     )
 
     print(
-        f"Целевая Accuracy достигнута: "
+        f"Целевая Accuracy достигнута на валидации: "
         f"{threshold_info['target_reached']}"
     )
 
-    print(
-        f"Accuracy при выбранном пороге: "
-        f"{threshold_info['achieved_accuracy']}"
-    )
-
-    print(
-        f"Покрытие: "
-        f"{threshold_info['coverage']:.2%}"
-    )
+    if test_threshold_accuracy is None:
+        print("На тесте при этом пороге нет ни одного принятого сообщения.")
+    else:
+        print(
+            f"На тесте при пороге: Accuracy {test_threshold_accuracy:.4f}, "
+            f"покрытие {test_threshold_coverage:.2%}"
+        )
 
     print(f"\nМодель сохранена: {MODEL_DIR}")
     print(f"Результаты сохранены: {RESULTS_DIR}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Обучение классификатора RuBERT."
+    )
+    parser.add_argument("--epochs", type=int, default=EPOCHS)
+    parser.add_argument("--max-length", type=int, default=MAX_LENGTH)
+    parser.add_argument("--data", type=Path, default=DATA_PATH)
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    train_model()
+    arguments = parse_args()
+
+    if arguments.epochs <= 0 or arguments.max_length <= 0:
+        raise SystemExit("--epochs и --max-length должны быть положительными.")
+
+    train_model(
+        epochs=arguments.epochs,
+        max_length=arguments.max_length,
+        data_path=arguments.data,
+    )
