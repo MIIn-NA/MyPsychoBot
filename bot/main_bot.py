@@ -130,7 +130,7 @@ async def process_exercise(callback: types.CallbackQuery):
         text = "🖐 **Заземление 5-4-3-2-1**\n\nНайди: 5 вещей (видишь), 4 (трогаешь), 3 (слышишь), 2 (чувствуешь запах), 1 (вкус)."
     else:
         text = "💪 **Релаксация**\n\nНапряги кулаки на 5 сек, расслабь на 10. Затем плечи, лицо, живот, ноги."
-    
+
     await callback.message.edit_text(text, parse_mode="Markdown")
     await callback.answer()
 
@@ -234,10 +234,10 @@ async def handle_context_button(message: types.Message):
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
     text = message.text
-    
+
     if user_id not in user_states:
         user_states[user_id] = {"previous_text": "", "clarification_count": 0, "awaiting_clarification": False, "awaiting_feedback": False}
-        
+
     state = user_states[user_id]
     if not isinstance(text, str) or not text.strip():
         await message.answer(
@@ -263,13 +263,13 @@ async def handle_message(message: types.Message):
 
     # Если ждем реакции на совет
     if state.get("awaiting_feedback"):
-        state["awaiting_feedback"] = False 
+        state["awaiting_feedback"] = False
         if any(word in text.lower() for word in ["да", "легче", "лучше", "спасибо"]):
             await message.answer("Я очень рад, что смог помочь! Если что-то еще случится, я всегда на связи. 😊", reply_markup=get_main_keyboard())
         else:
             await message.answer("Мне жаль, что всё еще тяжело. Иногда нужно время. Попробуй выполнить упражнение из меню или написать мне еще раз, чтобы я подобрал другой совет.", reply_markup=get_main_keyboard())
         return
-    
+
     # Если ждем уточнения (пользователь ввел текст вместо кнопки)
     if state.get("awaiting_clarification"):
         combined_text = f"{state['previous_text']} {text}"
