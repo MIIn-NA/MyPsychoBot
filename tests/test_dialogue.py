@@ -165,6 +165,59 @@ class DialogueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.kwargs['reply_markup'], 'main')
         self.ns['storage'].save_result.assert_awaited_once()
 
+    async def test_free_text_after_advice_is_analyzed_without_keyword_matching(self):
+        self.model.predict.return_value = (1, .9)
+        await self.send('Боюсь экзамена')
+        for text in ('Завтра сдаю экзамен', 'Не стало лучше, я боюсь идти на учебу',
+                     'Спасибо, но теперь меня беспокоит бессонница'):
+            with self.subTest(text=text):
+                reply = await self.send(text)
+                self.model.predict.assert_called_with(text)
+                self.assertIn('Совет:', reply.args[0])
+        self.assertEqual(self.ns['storage'].save_result.await_count, 4)
+
+    async def test_explicit_positive_feedback_does_not_analyze_or_save(self):
+        self.model.predict.return_value = (1, .9)
+        for text in ('Да!', 'Стало легче', 'Спасибо'):
+            with self.subTest(text=text):
+                self.ns['user_states'].clear()
+                await self.send('Боюсь экзамена')
+                self.model.predict.reset_mock()
+                self.ns['storage'].save_result.reset_mock()
+                reply = await self.send(text)
+                self.assertIn('Рад', reply.args[0])
+                self.assertFalse(self.ns['user_states'][1]['awaiting_feedback'])
+                self.model.predict.assert_not_called()
+                self.ns['storage'].save_result.assert_not_awaited()
+
+    async def test_negative_feedback_requests_context_then_analyzes_it(self):
+        self.model.predict.return_value = (1, .9)
+        for text in ('Нет', 'Не стало лучше', 'Не помогло', 'Стало хуже'):
+            with self.subTest(text=text):
+                self.ns['user_states'].clear()
+                await self.send('Боюсь экзамена')
+                self.model.predict.reset_mock()
+                self.ns['storage'].save_result.reset_mock()
+                reply = await self.send(text)
+                self.assertEqual(reply.kwargs['reply_markup'], 'context')
+                self.assertNotIn('Рад', reply.args[0])
+                self.model.predict.assert_not_called()
+                self.ns['storage'].save_result.assert_not_awaited()
+                await self.send('Не могу уснуть перед экзаменом')
+                self.model.predict.assert_called_once_with('Не могу уснуть перед экзаменом')
+                self.ns['storage'].save_result.assert_awaited_once()
+
+    async def test_repeated_vague_distress_after_advice_does_not_get_stuck(self):
+        self.model.predict.return_value = (1, .9)
+        await self.send('Боюсь экзамена')
+        reply = await self.send('мне плохо')
+        self.assertEqual(reply.kwargs['reply_markup'], 'context')
+        self.assertFalse(self.ns['user_states'][1]['awaiting_feedback'])
+        reply = await self.send('мне плохо')
+        self.model.predict.assert_called_with('мне плохо мне плохо')
+        self.assertIn('Совет:', reply.args[0])
+        self.assertEqual(self.model.predict.call_count, 2)
+
     async def test_vague_distress_and_all_context_buttons_in_demo_mode(self):
         self.ns['solver'] = Solver(MockModel(), KnowledgeBase())
         for topic, expected in (

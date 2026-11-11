@@ -223,7 +223,7 @@ async def handle_context_button(message: types.Message):
         return
 
     # Контекст уточняет текст, а класс по-прежнему определяет модель.
-    combined_text = f"{state['previous_text']} {text}"
+    combined_text = f"{state['previous_text']} {text}".strip()
     state["clarification_count"] += 1
     await process_solver(message, combined_text, state)
 
@@ -248,6 +248,36 @@ async def handle_message(message: types.Message):
 
     # Для общего описания сначала просим контекст, чтобы не делать вывод по одной фразе.
     normalized = " ".join(text.casefold().replace("ё", "е").split()).strip(" .,!?:…")
+    # Только самостоятельный короткий ответ считаем отзывом. Описание состояния
+    # (в том числе содержащее «да» или «лучше») должно попадать в решатель.
+    if state.get("awaiting_feedback"):
+        state["awaiting_feedback"] = False
+        if normalized in {
+            "да", "да, спасибо", "спасибо", "спасибо большое", "помогло",
+            "легче", "лучше", "стало легче", "стало лучше",
+            "да, стало легче", "да, стало лучше", "мне стало легче",
+            "мне стало лучше",
+        }:
+            await message.answer(
+                "Рад, что тебе стало легче. Если захочешь обсудить что-то ещё, напиши.",
+                reply_markup=get_main_keyboard(),
+            )
+            return
+        if normalized in {
+            "нет", "не помогло", "не помогает", "не легче", "не лучше",
+            "не стало легче", "не стало лучше", "мне не стало легче",
+            "мне не стало лучше", "нет, не помогло", "нет, не стало легче",
+            "нет, не стало лучше", "стало хуже", "хуже", "хочу рассказать подробнее",
+        }:
+            state.update(previous_text="", clarification_count=0,
+                         awaiting_clarification=True)
+            await message.answer(
+                "Расскажи, что сейчас беспокоит сильнее всего, или выбери тему ниже. "
+                "Я проанализирую это описание и подберу совет.",
+                reply_markup=get_context_keyboard(),
+            )
+            return
+
     if not state.get("awaiting_clarification") and normalized in {
         "плохо", "все плохо", "мне плохо", "очень плохо", "мне очень плохо",
         "все очень плохо", "тяжело", "мне тяжело",
@@ -261,18 +291,9 @@ async def handle_message(message: types.Message):
         )
         return
 
-    # Если ждем реакции на совет
-    if state.get("awaiting_feedback"):
-        state["awaiting_feedback"] = False
-        if any(word in text.lower() for word in ["да", "легче", "лучше", "спасибо"]):
-            await message.answer("Я очень рад, что смог помочь! Если что-то еще случится, я всегда на связи. 😊", reply_markup=get_main_keyboard())
-        else:
-            await message.answer("Мне жаль, что всё еще тяжело. Иногда нужно время. Попробуй выполнить упражнение из меню или написать мне еще раз, чтобы я подобрал другой совет.", reply_markup=get_main_keyboard())
-        return
-
     # Если ждем уточнения (пользователь ввел текст вместо кнопки)
     if state.get("awaiting_clarification"):
-        combined_text = f"{state['previous_text']} {text}"
+        combined_text = f"{state['previous_text']} {text}".strip()
         state["clarification_count"] += 1
         state["awaiting_clarification"] = False
         await process_solver(message, combined_text, state)
@@ -332,7 +353,10 @@ async def process_solver(message: types.Message, text: str, state: dict):
 
     state.update(previous_text="", awaiting_clarification=False, awaiting_feedback=True,
                  clarification_count=0)
-    response += "\n\nСтало ли тебе немного легче после этого совета? Или хочешь рассказать подробнее?"
+    response += (
+        "\n\nПомог ли совет? Можно ответить «стало легче» или «не помогло». "
+        "Если хочешь рассказать подробнее, напиши, что происходит — я проанализирую новое описание."
+    )
     try:
         today = datetime.date.today().isoformat()
         # Ограничение: до подключения учебных групп все записи относятся к группе 1.
