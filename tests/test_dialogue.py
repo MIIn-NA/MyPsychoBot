@@ -28,6 +28,7 @@ def handlers():
                      DEFAULT_GROUP_ID=1,
                      SolverError=SolverError, TextTooLongError=TextTooLongError, StorageError=StorageError,
                      MockModel=MockModel, storage=SimpleNamespace(save_result=AsyncMock()),
+                     offer_speech=AsyncMock(),
                      get_main_keyboard=lambda: 'main', get_context_keyboard=lambda: 'context')
     exec(compile(ast.Module(body=selected, type_ignores=[]), '<handlers>', 'exec'), namespace)
     return namespace

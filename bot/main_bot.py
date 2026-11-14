@@ -13,12 +13,14 @@ from mock_model import MockModel
 from knowledge_base import KnowledgeBase
 from storage import Storage, StorageError, StorageInitializationError
 from statistics_service import StatisticsService
+from speech import offer_speech, router as speech_router
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+dp.include_router(speech_router)
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
 def build_model():
@@ -107,7 +109,10 @@ async def cmd_help(message: types.Message):
         "Напиши мне любое сообщение о том, как ты себя чувствуешь.\n"
         "Например: «Я устал от учебы» или «Боюсь завалить экзамен».\n\n"
         "Я проанализирую текст с помощью нейросети и подберу рекомендацию. "
-        "Если я не совсем пойму твое состояние, я задам уточняющий вопрос."
+        "Если я не совсем пойму твое состояние, я задам уточняющий вопрос.\n\n"
+        "🔊 Под результатами анализа и упражнениями есть кнопка «Озвучить». "
+        "Она бесплатно создаёт аудио ответа; нужен интернет. "
+        "При нажатии текст ответа передаётся Microsoft."
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -131,8 +136,9 @@ async def process_exercise(callback: types.CallbackQuery):
     else:
         text = "💪 **Релаксация**\n\nНапряги кулаки на 5 сек, расслабь на 10. Затем плечи, лицо, живот, ноги."
 
-    await callback.message.edit_text(text, parse_mode="Markdown")
+    edited = await callback.message.edit_text(text, parse_mode="Markdown")
     await callback.answer()
+    await offer_speech(edited, callback.from_user.id)
 
 @dp.message(Command("fact"))
 @dp.message(F.text == "Интересный факт 💡")
@@ -345,10 +351,11 @@ async def process_solver(message: types.Message, text: str, state: dict):
             state["previous_text"] = ""
             state["clarification_count"] = 0
             response += "\n\nОценка остаётся предварительной. Напишите новое сообщение, чтобы начать новый анализ."
-        await message.answer(
+        sent = await message.answer(
             response, parse_mode="Markdown",
             reply_markup=get_context_keyboard() if first_preliminary else get_main_keyboard(),
         )
+        await offer_speech(sent, message.from_user.id)
         return
 
     state.update(previous_text="", awaiting_clarification=False, awaiting_feedback=True,
@@ -369,7 +376,8 @@ async def process_solver(message: types.Message, text: str, state: dict):
     except Exception as error:
         logging.error("Ошибка записи результата в SQLite (%s).", type(error).__name__)
 
-    await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    sent = await message.answer(response, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await offer_speech(sent, message.from_user.id)
 
 
 # --- ЗАПУСК ---
